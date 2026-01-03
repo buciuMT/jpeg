@@ -1,0 +1,3 @@
+[submodule "bstd"]
+	path = bstd
+	url = https://github.com/buciuMT/bstd
