@@ -99,7 +99,7 @@ YCBCR_TO_RGB_MULT = np.array(
         [1, 1.772, 0],
     ]
 )
-YCBCR_TO_RGB_ADD = -RGB_TO_YCBCR_ADD
+YCBCR_TO_RGB_ADD = RGB_TO_YCBCR_ADD
 
 Q100 = np.array(
     [
@@ -236,7 +236,7 @@ def quantize(
         a = (level - 50) / 50
         q = Q100 * a + (1 - a) * q
     q = q.astype(np.int32)
-    return ((mat / q).astype(np.int32), q)
+    return (np.round((mat / q).astype(np.int32)), q)
 
 
 def iquantize(mat: NDArray[np.int32], q: NDArray[np.int32]) -> NDArray[np.int32]:
@@ -273,7 +273,11 @@ def rgb2ycbcr(img: NDArray[np.uint8]) -> NDArray[np.uint8]:
 def ycbcr2rgb(img: NDArray[np.uint8]) -> NDArray[np.uint8]:
     shape = img.shape
     return (
-        np.clip((img.reshape(-1, 3) + YCBCR_TO_RGB_ADD.T) @ YCBCR_TO_RGB_MULT.T, 0, 255)
+        np.clip(
+            (img.reshape(-1, 3) - YCBCR_TO_RGB_ADD.T) @ YCBCR_TO_RGB_MULT.T,
+            0,
+            255,
+        )
         .reshape(shape)
         .astype(np.uint8)
     )
@@ -284,6 +288,7 @@ def decode_jpeg(args: argparse.Namespace):
 
 
 def lossy_copress(img: NDArray[np.uint8], qlevel: int = 50):
+    _shape = img.shape
     ybr = rgb2ycbcr(img)  # uint8
 
     ybr = ybr.astype(np.int32)  # turn it into int32 to preserve values during shift
@@ -307,6 +312,11 @@ def lossy_copress(img: NDArray[np.uint8], qlevel: int = 50):
     qby, q = quantize(dby, qlevel)
     qbcb, _ = quantize(dbcb, qlevel)
     qbcr, _ = quantize(dbcr, qlevel)
+
+    tmp = i_split_blocks(idct8x8(iquantize(qby, q)), _shape[0], _shape[1])
+    plt.imshow(tmp.reshape((_shape[0], _shape[1])).astype(np.int32) + 128)
+    plt.show()
+
     return (qby, qbcb, qbcr, q)
 
 
@@ -331,7 +341,8 @@ def lossy_decompress(
     cr = i_split_blocks(bcr, w // 2, h // 2).repeat(2, axis=0).repeat(2, axis=1)
 
     img = np.stack([y, cb, cr], axis=-1) + 128
-    return img.astype(np.uint8)[:width, :heigth]
+
+    return ycbcr2rgb(img.astype(np.uint8))[:width, :heigth]
 
 
 def image_pad(img: NDArray[np.uint8]):
