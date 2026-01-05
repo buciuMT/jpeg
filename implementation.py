@@ -73,12 +73,12 @@ class HuffmanNode:
 
 
 def dct8x8(mat: NDArray[np.int32]) -> NDArray[np.int32]:
-    m = np.array(dctn(mat, axes=(1, 2)))
+    m = np.array(dctn(mat, axes=(1, 2), norm="ortho"))
     return np.round(m).astype(np.int32)
 
 
 def idct8x8(mat: NDArray[np.int32]) -> NDArray[np.int32]:
-    m = np.array(idctn(mat, axes=(1, 2)))
+    m = np.array(idctn(mat, axes=(1, 2), norm="ortho"))
     return np.round(m).astype(np.int32)
 
 
@@ -225,16 +225,22 @@ def i_split_blocks(mat: NDArray[np.int32], w: int, h: int):
     return mat.reshape(w // 8, h // 8, 8, 8).swapaxes(1, 2).reshape(w, h)
 
 
-def quantize(mat: NDArray[np.int32], level: int) -> NDArray[np.int32]:
+def quantize(
+    mat: NDArray[np.int32], level: int
+) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
     q = Q50
     if level < 50:
         a = level / 50
         q = q * a + (1 - a) * Q1
     else:
         a = (level - 50) / 50
-        q = Q100 * a + (a - 1) * q
-    q = np.round(q)
-    return (np.round(mat / q) * q).astype(np.int32)
+        q = Q100 * a + (1 - a) * q
+    q = q.astype(np.int32)
+    return ((mat / q).astype(np.int32), q)
+
+
+def iquantize(mat: NDArray[np.int32], q: NDArray[np.int32]) -> NDArray[np.int32]:
+    return np.round(mat * q).astype(np.int32)
 
 
 def diagonlaization(mat: NDArray[np.int32]) -> NDArray[np.int32]:
@@ -277,23 +283,10 @@ def decode_jpeg(args: argparse.Namespace):
     pass
 
 
-def encode_jpeg(image, args: argparse.Namespace, qlevel: None | int = None):
-    img: NDArray[np.uint8] = np.array(image)
-    (width, heigth, channels) = img.shape
-    if channels > 3:
-        img = img[:, :, :3]
+def lossy_copress(img: NDArray[np.uint8], qlevel: int = 50):
+    ybr = rgb2ycbcr(img)  # uint8
 
-    w: int = ((width + 15) // 16) * 16
-    h: int = ((heigth + 15) // 16) * 16
-
-    img = np.pad(img, ((0, w - width), (0, h - heigth), (0, 0)), mode="edge")
-
-    ybr = rgb2ycbcr(img)
-
-    if args.ycbcr:
-        IMG.fromarray(ybr).save(args.ycbcr)
-
-    ybr = ybr.astype(np.int32)
+    ybr = ybr.astype(np.int32)  # turn it into int32 to preserve values during shift
 
     # shift
     ybr -= 128
@@ -311,17 +304,53 @@ def encode_jpeg(image, args: argparse.Namespace, qlevel: None | int = None):
     dbcb = dct8x8(bcb)
     dbcr = dct8x8(bcr)
 
-    if qlevel is None:
-        qlevel = 50
-    if args.qlevel is not None:
-        qlevel = int(args.qlevel)
+    qby, q = quantize(dby, qlevel)
+    qbcb, _ = quantize(dbcb, qlevel)
+    qbcr, _ = quantize(dbcr, qlevel)
+    return (qby, qbcb, qbcr, q)
 
-    qby = quantize(dby, qlevel)
-    qbcb = quantize(dbcb, qlevel)
-    qbcr = quantize(dbcr, qlevel)
 
-    hy = generate_huffman_tree(qby.flatten().astype(np.int8))
-    print(sanatize_hbits(hy.getbits()))
+def lossy_decompress(
+    qby: NDArray[np.int32],
+    qbcb: NDArray[np.int32],
+    qbcr: NDArray[np.int32],
+    q: NDArray[np.int32],
+    width: int,
+    heigth: int,
+) -> NDArray[np.uint8]:
+    w: int = ((width + 15) // 16) * 16
+    h: int = ((heigth + 15) // 16) * 16
+
+    by = idct8x8(iquantize(qby.reshape(-1, 8, 8).astype(np.int32), q))
+    bcb = idct8x8(iquantize(qbcb.reshape(-1, 8, 8).astype(np.int32), q))
+    bcr = idct8x8(iquantize(qbcr.reshape(-1, 8, 8).astype(np.int32), q))
+
+    y = i_split_blocks(by, w, h)
+
+    cb = i_split_blocks(bcb, w // 2, h // 2).repeat(2, axis=0).repeat(2, axis=1)
+    cr = i_split_blocks(bcr, w // 2, h // 2).repeat(2, axis=0).repeat(2, axis=1)
+
+    img = np.stack([y, cb, cr], axis=-1) + 128
+    return img.astype(np.uint8)[:width, :heigth]
+
+
+def image_pad(img: NDArray[np.uint8]):
+    (width, heigth, channels) = img.shape
+    if channels > 3:
+        img = img[:, :, :3]
+
+    w: int = ((width + 15) // 16) * 16
+    h: int = ((heigth + 15) // 16) * 16
+
+    return np.pad(img, ((0, w - width), (0, h - heigth), (0, 0)), mode="edge")
+
+
+def encode_jpeg(image, qlevel: int):
+    img: NDArray[np.uint8] = np.array(image)
+    img = image_pad(img)
+
+    r = lossy_copress(img, qlevel=qlevel)
+    ##todo
 
 
 def main():
@@ -334,13 +363,35 @@ def main():
     _ = arg_parser.add_argument("-o", "--output", type=str, help="output file")
     _ = arg_parser.add_argument("-y", "--ycbcr", type=str, help="ycbcr file")
     _ = arg_parser.add_argument("-q", "--qlevel", type=int, help="quantization level")
+    _ = arg_parser.add_argument("-m", "--mse", type=float, help="desired mse")
     args = arg_parser.parse_args()
 
     if str(args.input).endswith("jpeg"):
         decode_jpeg(args)
     else:
         image = img.open(str(args.input))
-        encode_jpeg(image, args)
+        if args.qlevel is not None:
+            encode_jpeg(image, qlevel=args.qlevel)
+        elif args.mse is not None:
+            imag = np.array(image)
+            (width, heigth, channels) = imag.shape
+            pim = image_pad(imag)
+            l, r = (0, 100)
+            while l <= r:
+                m = (l + r) // 2
+                res = lossy_copress(pim, m)
+                dec = lossy_decompress(*res, width, heigth)
+
+                print(m)
+                plt.imshow(dec)
+                plt.show()
+
+                mse = np.square(imag - dec).mean()
+                if mse > args.mse:
+                    r = m - 1
+                else:
+                    l = m + 1
+            encode_jpeg(pim, l)
 
 
 if __name__ == "__main__":
