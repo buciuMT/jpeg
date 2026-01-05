@@ -9,6 +9,7 @@ from scipy.fft import dctn, idctn
 import heapq
 import bitstring
 import functools
+import cv2
 
 IMG = img
 
@@ -16,26 +17,72 @@ IMG = img
 # https://en.wikibooks.org/wiki/JPEG_-_Idea_and_Practice/The_Huffman_coding
 
 
-def generate_huffman_tree(arr: NDArray[np.int8]):
-    heap = [
-        HuffmanNode(char=np.int8(element), count=count)
-        for element, count in Counter(arr).items()
-    ]
-    heapq.heapify(heap)
-    while len(heap) > 1:
-        l = heapq.heappop(heap)
-        r = heapq.heappop(heap)
-        heapq.heappush(heap, HuffmanNode(count=l.count + r.count, l=l, r=r))
-    return heapq.heappop(heap)
+def encode_using_table(
+    arr: NDArray[np.int8],
+    ac: dict[np.int8, bitstring.Bits],
+    dc: dict[np.int8, bitstring.Bits],
+) -> bitstring.Bits:
+    res = bitstring.BitArray()
+    cnt = 0
+    for block in arr.reshape(-1, 8 * 8):
+        res.append(dc[block[0]])
+        for c in block[0:]:
+            if c == 0:
+                cnt += 1
+                if cnt > 15:
+                    pass
+            # res.append(ac[c])
+    return res
 
 
-def sanatize_hbits(ht: dict[np.int8, bitstring.Bits]) -> dict[np.int8, bitstring.Bits]:
-    no1 = {c: b + bitstring.Bits("0b0") if b.all(True) else b for c, b in ht.items()}
-    for _, b in no1.items():
-        if b.length > 16:
-            print("Edgce case not handled")
-            exit(-1)
-    return no1
+def ac_length_coding(arr: NDArray[np.int8]) -> NDArray[np.int8]:
+    res = []
+    cnt = 0
+    for i, c in enumerate(arr):
+        if c == 0:
+            cnt += 1
+            if cnt > 15:
+                res.append(cnt)
+                res.append(np.int8(0))
+                cnt = 0
+        else:
+            res.append(cnt)
+            cnt = 0
+            res.append(c)
+    return np.array(res).astype(np.int8)
+
+
+def generate_huffman_ac(
+    dc1: NDArray[np.int8], dc2: NDArray[np.int8] | None = None
+) -> dict[np.int8, bitstring.Bits]:
+    return generate_huffman_table_froma_values(
+        np.concat(
+            (
+                ac_length_coding(dc1),
+                np.array([]) if dc2 is None else ac_length_coding(dc2),
+            )
+        )
+    )
+
+
+def dif_coding(arr: NDArray[np.int8]) -> NDArray[np.int8]:
+    arr[1:] -= arr[:-1]
+    return arr
+
+
+def generate_huffman_dc(
+    dc1: NDArray[np.int8], dc2: NDArray[np.int8] | None = None
+) -> dict[np.int8, bitstring.Bits]:
+    return generate_huffman_table_froma_values(
+        np.concat((dif_coding(dc1), np.array([]) if dc2 is None else dif_coding(dc2)))
+    )
+
+
+def generate_huffman_table_froma_values(
+    arr: NDArray[np.int8],
+) -> dict[np.int8, bitstring.Bits]:
+    ht = generate_huffman_tree(arr)
+    return sanatize_hbits(ht.getbits())
 
 
 @functools.total_ordering
@@ -72,6 +119,28 @@ class HuffmanNode:
         return self.count < other.count
 
 
+def generate_huffman_tree(arr: NDArray[np.int8]) -> HuffmanNode:
+    heap = [
+        HuffmanNode(char=np.int8(element), count=count)
+        for element, count in Counter(arr).items()
+    ]
+    heapq.heapify(heap)
+    while len(heap) > 1:
+        l = heapq.heappop(heap)
+        r = heapq.heappop(heap)
+        heapq.heappush(heap, HuffmanNode(count=l.count + r.count, l=l, r=r))
+    return heapq.heappop(heap)
+
+
+def sanatize_hbits(ht: dict[np.int8, bitstring.Bits]) -> dict[np.int8, bitstring.Bits]:
+    no1 = {c: b + bitstring.Bits("0b0") if b.all(True) else b for c, b in ht.items()}
+    for _, b in no1.items():
+        if b.length > 16:
+            print("Edgce case not handled")
+            exit(-1)
+    return no1
+
+
 def dct8x8(mat: NDArray[np.int32]) -> NDArray[np.int32]:
     m = np.array(dctn(mat, axes=(1, 2), norm="ortho"))
     return np.round(m).astype(np.int32)
@@ -103,14 +172,14 @@ YCBCR_TO_RGB_ADD = RGB_TO_YCBCR_ADD
 
 Q100 = np.array(
     [
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
-        [1, 1, 1, 1, 1, 1, 1, 1],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
+        [8, 8, 8, 8, 8, 8, 8, 8],
     ]
 )
 
@@ -245,15 +314,15 @@ def iquantize(mat: NDArray[np.int32], q: NDArray[np.int32]) -> NDArray[np.int32]
 
 def diagonlaization(mat: NDArray[np.int32]) -> NDArray[np.int32]:
     flat = mat.reshape(-1, 8 * 8)
-    return flat[np.arange(flat.shape[0]), DIAG_ORDER].reshape(-1)
+    return flat[:, DIAG_ORDER].reshape(-1)
 
 
 def idiagonlaization(mat: NDArray[np.int32]) -> NDArray[np.int32]:
     flat = mat.reshape(-1, 8 * 8)
-    return flat[np.arange(flat.shape[0]), INV_DIAG_ORDER].reshape(-1)
+    return flat[:, INV_DIAG_ORDER].reshape(-1)
 
 
-def split_ac_dc(mat: NDArray[np.int32]) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
+def split_ac_dc(mat: NDArray[np.int8]) -> tuple[NDArray[np.int8], NDArray[np.int8]]:
     return (mat.reshape(-1, 64)[:, 1:].flatten(), mat[:: 8 * 8])
 
 
@@ -313,10 +382,6 @@ def lossy_copress(img: NDArray[np.uint8], qlevel: int = 50):
     qbcb, _ = quantize(dbcb, qlevel)
     qbcr, _ = quantize(dbcr, qlevel)
 
-    tmp = i_split_blocks(idct8x8(iquantize(qby, q)), _shape[0], _shape[1])
-    plt.imshow(tmp.reshape((_shape[0], _shape[1])).astype(np.int32) + 128)
-    plt.show()
-
     return (qby, qbcb, qbcr, q)
 
 
@@ -356,12 +421,42 @@ def image_pad(img: NDArray[np.uint8]):
     return np.pad(img, ((0, w - width), (0, h - heigth), (0, 0)), mode="edge")
 
 
-def encode_jpeg(image, qlevel: int):
+def generate_bytes(
+    qby: NDArray[np.int32],
+    qbcb: NDArray[np.int32],
+    qbcr: NDArray[np.int32],
+    q: NDArray[np.int32],
+    width: int,
+    heigth: int,
+):
+    zy = diagonlaization(qby).astype(np.int8)
+    zcb = diagonlaization(qbcb).astype(np.int8)
+    zcr = diagonlaization(qbcr).astype(np.int8)
+
+    acy, dcy = split_ac_dc(zy)
+    acb, dcb = split_ac_dc(zcb)
+    acr, dcr = split_ac_dc(zcr)
+
+    hluma_ac = generate_huffman_ac(acy)
+    hluma_dc = generate_huffman_dc(dcy)
+
+    chroma_ac = generate_huffman_ac(acb, acr)
+    chroma_dc = generate_huffman_dc(dcb, dcr)
+    print(*sorted([(c.length, str(c), v) for v, c in chroma_dc.items()]), sep="\n")
+
+    tables = (hluma_ac, hluma_dc, chroma_ac, chroma_dc)
+
+
+def encode_jpeg(image, qlevel: int) -> bytes:
     img: NDArray[np.uint8] = np.array(image)
     img = image_pad(img)
 
     r = lossy_copress(img, qlevel=qlevel)
-    ##todo
+    dec = lossy_decompress(*r, img.shape[0], img.shape[1])
+    plt.imshow(dec)
+    plt.show()
+    b = generate_bytes(*r, img.shape[0], img.shape[1])
+    return b""
 
 
 def main():
@@ -377,8 +472,21 @@ def main():
     _ = arg_parser.add_argument("-m", "--mse", type=float, help="desired mse")
     args = arg_parser.parse_args()
 
-    if str(args.input).endswith("jpeg"):
+    if str(args.input).endswith(".jpeg"):
         decode_jpeg(args)
+    elif args.input.endswith(".mp4"):
+        vid = cv2.VideoCapture(args.input)
+        count = 0
+        while True:
+            success, image = vid.read()
+            if not success:
+                break
+            image = np.array(image)
+            pim = image_pad(image)
+            count += 1
+            encode_jpeg(pim, 50 if args.qlevel is None else args.qlevel)
+        vid.release()
+
     else:
         image = img.open(str(args.input))
         if args.qlevel is not None:
@@ -392,10 +500,6 @@ def main():
                 m = (l + r) // 2
                 res = lossy_copress(pim, m)
                 dec = lossy_decompress(*res, width, heigth)
-
-                print(m)
-                plt.imshow(dec)
-                plt.show()
 
                 mse = np.square(imag - dec).mean()
                 if mse > args.mse:
